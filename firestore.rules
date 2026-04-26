@@ -1,0 +1,153 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isSelf(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    function userDoc(uid) {
+      return get(/databases/$(database)/documents/users/$(uid));
+    }
+
+    function role() {
+      return isSignedIn() && userDoc(request.auth.uid).exists()
+        ? userDoc(request.auth.uid).data.role
+        : null;
+    }
+
+    function isTeacher() {
+      return role() == 'teacher';
+    }
+
+    function isStudent() {
+      return role() == 'student';
+    }
+
+    function classDoc(classId) {
+      return get(/databases/$(database)/documents/classes/$(classId));
+    }
+
+    function lectureDoc(lectureId) {
+      return get(/databases/$(database)/documents/lectures/$(lectureId));
+    }
+
+    function isTeacherOfClass(classId) {
+      return isSignedIn()
+        && classDoc(classId).exists()
+        && classDoc(classId).data.teacherId == request.auth.uid;
+    }
+
+    function enrollmentId(classId, studentId) {
+      return classId + '_' + studentId;
+    }
+
+    function legacyEnrollmentId(studentId, classId) {
+      return studentId + '_' + classId;
+    }
+
+    function isEnrolled(classId, studentId) {
+      return exists(/databases/$(database)/documents/enrollments/$(enrollmentId(classId, studentId)))
+        || exists(/databases/$(database)/documents/enrollments/$(legacyEnrollmentId(studentId, classId)));
+    }
+
+    // -----------------
+    // users/{uid}
+    // -----------------
+    match /users/{uid} {
+      allow read: if isSelf(uid);
+      allow create: if isSelf(uid);
+      allow update: if isSelf(uid)
+        && request.resource.data.role == resource.data.role;
+      allow delete: if false;
+    }
+
+    // -----------------
+    // classes/{classId}
+    // -----------------
+    match /classes/{classId} {
+      allow create: if isSignedIn()
+        && request.resource.data.teacherId == request.auth.uid
+        && request.resource.data.classCode is string
+        && request.resource.data.className is string;
+
+      // Signed-in users can read class metadata (needed for join-by-code UX)
+      allow read: if isSignedIn();
+
+      allow update, delete: if isTeacherOfClass(classId);
+    }
+
+    // -----------------
+    // lectures/{lectureId}
+    // lecture doc shape:
+    //   { classId, className, classCode, teacherId, day, start, end, subject, room, isLive }
+    // -----------------
+    match /lectures/{lectureId} {
+      allow create: if isSignedIn()
+        && request.resource.data.teacherId == request.auth.uid
+        && request.resource.data.classId is string
+        && request.resource.data.className is string
+        && request.resource.data.classCode is string
+        && request.resource.data.day is string
+        && request.resource.data.start is string
+        && request.resource.data.end is string
+        && request.resource.data.subject is string
+        && request.resource.data.room is string
+        && request.resource.data.isLive is bool;
+
+      allow read: if (isSignedIn() && resource.data.teacherId == request.auth.uid)
+        || (isSignedIn() && isEnrolled(resource.data.classId, request.auth.uid));
+
+      // Teachers who own the lecture can toggle live state even if class metadata changed.
+      allow update, delete: if isSignedIn()
+        && resource.data.teacherId == request.auth.uid
+        && request.resource.data.teacherId == resource.data.teacherId
+        && request.resource.data.classId == resource.data.classId;
+    }
+
+    // -----------------
+    // enrollments/{enrollmentId}
+    // enrollment doc shape:
+    //   { studentId, classId, joinedAt }
+    // -----------------
+    match /enrollments/{enrollmentId} {
+      allow create: if isSignedIn()
+        && request.resource.data.studentId == request.auth.uid
+        && request.resource.data.classId is string;
+
+      allow read: if (isSignedIn() && resource.data.studentId == request.auth.uid)
+        || isTeacherOfClass(resource.data.classId);
+
+      allow delete: if isSignedIn() && resource.data.studentId == request.auth.uid;
+      allow update: if false;
+    }
+
+    // -----------------
+    // attendance/{attendanceId}
+    // attendance doc shape:
+    //   { classId, lectureId?, studentId, status, date, timestamp }
+    // -----------------
+    match /attendance/{attendanceId} {
+      // Simplified rules for testing - allow signed-in users to create attendance
+      allow create: if isSignedIn()
+        && request.resource.data.studentId is string
+        && request.resource.data.classId is string
+        && request.resource.data.status in ['present', 'absent']
+        && request.resource.data.date is string;
+
+      allow update: if isSignedIn()
+        && request.resource.data.classId is string
+        && request.resource.data.studentId is string
+        && request.resource.data.status in ['present', 'absent']
+        && request.resource.data.date is string;
+
+      // Allow read for signed-in users (students can read their own, teachers can read all)
+      allow read: if isSignedIn();
+
+      allow delete: if false;
+    }
+  }
+}
